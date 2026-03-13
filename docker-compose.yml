@@ -1,0 +1,24 @@
+services:
+  migrate:
+    build: .
+    env_file:
+      - .env
+    command: ["bunx", "prisma", "migrate", "deploy"]
+    restart: "no"
+
+  api:
+    build: .
+    env_file:
+      - .env
+    environment:
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  bot:
+    build: .
+    env_file:
+      - .env
+    command: ["bun", "run", "src/bot/discordBot.ts"]
+    restart: unless-stopped
