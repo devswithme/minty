@@ -15,6 +15,8 @@ router.get("/submit", async (c) => {
   const courseId = c.req.query("course_id");
   if (!courseId) return c.text("Missing course_id", 400);
 
+  const subcourseId = c.req.query("subcourse_id") ?? null;
+
   const origin = new URL(c.req.url).origin;
   const cookie = c.req.header("cookie") ?? "";
 
@@ -31,7 +33,9 @@ router.get("/submit", async (c) => {
   const userId = sessionData?.user?.id ?? null;
 
   if (!userId) {
-    const callbackURL = `/submit?course_id=${encodeURIComponent(courseId)}`;
+    const callbackURL = `/submit?course_id=${encodeURIComponent(
+      courseId,
+    )}${subcourseId ? `&subcourse_id=${encodeURIComponent(subcourseId)}` : ""}`;
     return c.redirect(
       `/api/auth/signin/discord?callbackURL=${encodeURIComponent(callbackURL)}`,
       302,
@@ -39,11 +43,23 @@ router.get("/submit", async (c) => {
   }
 
   // Ensure the course_id exists in the DB (create placeholder if missing)
-  await prisma.course.upsert({
+  const course = await prisma.course.upsert({
     where: { id: courseId },
     update: {},
     create: { id: courseId, name: courseId },
   });
+
+  const hasSubcourses = await prisma.subcourse.findFirst({
+    where: { parentCourseId: course.id },
+    select: { id: true },
+  });
+
+  if (hasSubcourses && !subcourseId) {
+    return c.text(
+      "This course requires a subcourse_id. Please use a link that includes subcourse_id.",
+      400,
+    );
+  }
 
   const discordAccount = await prisma.account.findFirst({
     where: { userId, providerId: "discord" },
@@ -51,7 +67,9 @@ router.get("/submit", async (c) => {
   });
 
   if (!discordAccount?.accountId) {
-    const callbackURL = `/submit?course_id=${encodeURIComponent(courseId)}`;
+    const callbackURL = `/submit?course_id=${encodeURIComponent(
+      courseId,
+    )}${subcourseId ? `&subcourse_id=${encodeURIComponent(subcourseId)}` : ""}`;
     return c.redirect(
       `/api/auth/signin/discord?callbackURL=${encodeURIComponent(callbackURL)}`,
       302,
@@ -61,6 +79,9 @@ router.get("/submit", async (c) => {
   const tally = new URL("https://tally.so/r/XxGO8z");
   tally.searchParams.set("discord_id", discordAccount.accountId);
   tally.searchParams.set("course_id", courseId);
+  if (subcourseId) {
+    tally.searchParams.set("subcourse_id", subcourseId);
+  }
   return c.redirect(tally.toString(), 302);
 });
 

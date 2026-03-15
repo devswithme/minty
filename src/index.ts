@@ -24,39 +24,66 @@ app.get("/v/:certificateId", async (c) => {
     } as any,
   } as any)) as any;
 
-  if (!evaluation) {
-    return c.json({ valid: false, error: "Certificate not found" }, 404);
+  if (evaluation) {
+    const submission = evaluation.tallySubmission;
+    const course = await prisma.course
+      .findUnique({
+        where: { id: submission.courseId },
+        select: { name: true },
+      })
+      .catch(() => null);
+
+    const avgScore =
+      (evaluation.codeQuality +
+        evaluation.functionality +
+        evaluation.conceptualUnderstanding) /
+      3;
+
+    return c.json({
+      valid: true,
+      certificateId,
+      status: evaluation.status,
+      issuedAt: evaluation.certificateIssuedAt,
+      courseId: submission.courseId,
+      courseName: course?.name ?? submission.courseId,
+      studentDiscordId: submission.discordId,
+      leadMentorDiscordId: evaluation.mentorDiscordId,
+      leadMentorName: evaluation.leadMentorName ?? null,
+      rubrics: {
+        codeQuality: evaluation.codeQuality,
+        functionality: evaluation.functionality,
+        conceptualUnderstanding: evaluation.conceptualUnderstanding,
+        average: Number.isFinite(avgScore) ? avgScore : null,
+      },
+    });
   }
 
-  const submission = evaluation.tallySubmission;
-  const course = await prisma.course
-    .findUnique({
-      where: { id: submission.courseId },
-      select: { name: true },
-    })
-    .catch(() => null);
+  const parentCompletion = await prisma.parentCourseCompletion.findFirst({
+    where: { certificateId },
+    include: {
+      parentCourse: true,
+    },
+  });
 
-  const avgScore =
-    (evaluation.codeQuality +
-      evaluation.functionality +
-      evaluation.conceptualUnderstanding) /
-    3;
+  if (!parentCompletion) {
+    return c.json({ valid: false, error: "Certificate not found" }, 404);
+  }
 
   return c.json({
     valid: true,
     certificateId,
-    status: evaluation.status,
-    issuedAt: evaluation.certificateIssuedAt,
-    courseId: submission.courseId,
-    courseName: course?.name ?? submission.courseId,
-    studentDiscordId: submission.discordId,
-    leadMentorDiscordId: evaluation.mentorDiscordId,
-    leadMentorName: evaluation.leadMentorName ?? null,
+    status: "PASS",
+    issuedAt: parentCompletion.issuedAt,
+    courseId: parentCompletion.parentCourseId,
+    courseName: parentCompletion.parentCourse.name,
+    studentDiscordId: parentCompletion.discordId,
+    leadMentorDiscordId: null,
+    leadMentorName: null,
     rubrics: {
-      codeQuality: evaluation.codeQuality,
-      functionality: evaluation.functionality,
-      conceptualUnderstanding: evaluation.conceptualUnderstanding,
-      average: Number.isFinite(avgScore) ? avgScore : null,
+      codeQuality: null,
+      functionality: null,
+      conceptualUnderstanding: null,
+      average: null,
     },
   });
 });

@@ -81,7 +81,21 @@ model Course {
   name            String
   channel_id      String? @unique
 
+  subcourses      Subcourse[]
+  completions     ParentCourseCompletion[]
+
   @@map("course")
+}
+
+model Subcourse {
+  id             String   @id
+  name           String
+  order          Int
+  parentCourseId String
+  parentCourse   Course   @relation(fields: [parentCourseId], references: [id], onDelete: Cascade)
+
+  @@index([parentCourseId])
+  @@map("subcourse")
 }
 
 model TallySubmission {
@@ -93,6 +107,7 @@ model TallySubmission {
   submissionId   String?
 
   courseId       String
+  subcourseId    String?
   discordId      String
   submissionText String
 
@@ -102,6 +117,7 @@ model TallySubmission {
 
   @@index([courseId])
   @@index([discordId])
+  @@index([courseId, subcourseId])
   @@map("tally_submission")
 }
 
@@ -172,4 +188,19 @@ model MentorClaim {
   @@index([courseId])
   @@index([mentorDiscordId])
   @@map("mentor_claim")
+}
+
+model ParentCourseCompletion {
+  id             String   @id @default(cuid())
+  discordId      String
+  parentCourseId String
+  parentCourse   Course   @relation(fields: [parentCourseId], references: [id], onDelete: Cascade)
+
+  certificateId  String   @unique
+  issuedAt       DateTime @default(now())
+
+  @@index([discordId])
+  @@index([parentCourseId])
+  @@index([discordId, parentCourseId])
+  @@map("parent_course_completion")
 }

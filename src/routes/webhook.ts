@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { prisma } from "../lib/prisma";
-import { createForumPost } from "../lib/discord";
+import { createForumPost, getForumTagIdByName } from "../lib/discord";
 
 type TallyField = {
   key: string;
@@ -84,6 +84,7 @@ router.post("/tally", async (c) => {
   const courseId = getFieldValueByLabel(fields, "course_id");
   const discordId = getFieldValueByLabel(fields, "discord_id");
   const submissionText = getFieldValueByLabel(fields, "Submission");
+  const subcourseId = getFieldValueByLabel(fields, "subcourse_id");
 
   if (!payload.eventId || !payload.eventType || !payload.createdAt) {
     return c.json(
@@ -102,7 +103,56 @@ router.post("/tally", async (c) => {
     );
   }
 
+  const existingSubcourse = await prisma.subcourse.findFirst({
+    where: { parentCourseId: courseId },
+    select: { id: true },
+  });
+
+  if (existingSubcourse && !subcourseId) {
+    return c.json(
+      {
+        ok: false,
+        error:
+          "This course requires subcourse_id in the Tally payload but it is missing.",
+      },
+      400,
+    );
+  }
+
   // Persist (idempotent on eventId)
+  let effectiveCourseId = courseId;
+  let effectiveSubcourseId: string | null = null;
+  let subcourseName: string | null = null;
+
+  if (subcourseId) {
+    const subcourse = await prisma.subcourse.findUnique({
+      where: { id: subcourseId },
+      include: { parentCourse: true },
+    });
+
+    if (!subcourse) {
+      return c.json(
+        { ok: false, error: `Invalid subcourse_id: ${subcourseId}` },
+        400,
+      );
+    }
+
+    if (subcourse.parentCourseId !== courseId) {
+      return c.json(
+        {
+          ok: false,
+          error:
+            "subcourse_id does not belong to the provided course_id (parent course mismatch)",
+        },
+        400,
+      );
+    }
+
+    effectiveCourseId = subcourse.parentCourseId;
+    effectiveSubcourseId = subcourse.id;
+    subcourseName = subcourse.name;
+  }
+
   const created = await prisma.tallySubmission
     .create({
       data: {
@@ -111,7 +161,8 @@ router.post("/tally", async (c) => {
         eventCreatedAt: new Date(payload.createdAt),
         responseId: payload.data?.responseId ?? null,
         submissionId: payload.data?.submissionId ?? null,
-        courseId,
+        courseId: effectiveCourseId,
+        subcourseId: effectiveSubcourseId,
         discordId,
         submissionText,
       },
@@ -143,12 +194,18 @@ router.post("/tally", async (c) => {
 
   // Ensure only one active (unreviewed) submission thread per user per course.
   // Look up the most recent prior submission for this user & course.
+  const priorWhere: any = {
+    courseId: effectiveCourseId,
+    discordId,
+    id: { not: created.id },
+  };
+
+  if (effectiveSubcourseId) {
+    priorWhere.subcourseId = effectiveSubcourseId;
+  }
+
   const prior = await prisma.tallySubmission.findFirst({
-    where: {
-      courseId,
-      discordId,
-      id: { not: created.id },
-    },
+    where: priorWhere,
     orderBy: { createdAt: "desc" },
     include: { evaluation: true },
   });
@@ -166,18 +223,23 @@ router.post("/tally", async (c) => {
   }
 
   const course = await prisma.course.findUnique({
-    where: { id: courseId },
+    where: { id: effectiveCourseId },
     select: { channel_id: true, name: true },
   });
   const channelId = course?.channel_id ?? null;
-  const courseName = course?.name ?? courseId;
+  const courseName = course?.name ?? effectiveCourseId;
 
   // Count how many submissions this user has made for this course (including this one)
+  const submissionCountWhere: any = {
+    courseId: effectiveCourseId,
+    discordId,
+  };
+  if (effectiveSubcourseId) {
+    submissionCountWhere.subcourseId = effectiveSubcourseId;
+  }
+
   const submissionCount = await prisma.tallySubmission.count({
-    where: {
-      courseId,
-      discordId,
-    },
+    where: submissionCountWhere,
   });
   if (!channelId) {
     return c.json(
@@ -190,16 +252,39 @@ router.post("/tally", async (c) => {
     );
   }
 
+  let appliedTagIds: string[] | undefined;
+  if (subcourseName) {
+    const tagId = await getForumTagIdByName(channelId, subcourseName);
+    if (tagId) {
+      appliedTagIds = [tagId];
+    } else {
+      console.warn(
+        "Webhook: subcourse tag not found in forum; continuing without tag",
+        {
+          channelId,
+          subcourseName,
+        },
+      );
+    }
+  }
+
+  const threadTitleBase = subcourseName
+    ? `[${subcourseName}] ${courseName}`
+    : courseName;
+
+  const headerLines = [
+    `Course: ${courseName} (${effectiveCourseId})`,
+    subcourseName ? `Subcourse: ${subcourseName} (${effectiveSubcourseId})` : null,
+    `User: <@${discordId}>`,
+    `Submission ke-${submissionCount}`,
+    "",
+  ].filter((line): line is string => Boolean(line));
+
   const thread = await createForumPost({
     channelId,
-    name: `${courseName} - Submission #${submissionCount}`,
-    content: [
-      `Course: ${courseName} (${courseId})`,
-      `User: <@${discordId}>`,
-      `Submission ke-${submissionCount}`,
-      "",
-      submissionText,
-    ].join("\n"),
+    name: `${threadTitleBase} - Submission #${submissionCount}`,
+    content: [...headerLines, submissionText].join("\n"),
+    appliedTagIds,
   });
 
   return c.json(

@@ -40,3 +40,40 @@ export async function createForumPost(
 
   return (await res.json()) as DiscordThreadResponse;
 }
+
+export async function getForumTagIdByName(
+  channelId: string,
+  tagName: string,
+): Promise<string | null> {
+  const token = process.env.DISCORD_BOT_TOKEN;
+  if (!token) throw new Error("Missing DISCORD_BOT_TOKEN");
+
+  const res = await fetch(
+    `https://discord.com/api/v10/channels/${channelId}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bot ${token}`,
+      },
+    },
+  );
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    console.error(
+      "Discord API error while fetching channel for tags",
+      res.status,
+      text,
+    );
+    return null;
+  }
+
+  const data = (await res.json()) as any;
+  const tags: { id: string; name: string }[] = Array.isArray(data.available_tags)
+    ? data.available_tags
+    : [];
+
+  const lower = tagName.toLowerCase();
+  const found = tags.find((t) => t.name.toLowerCase() === lower);
+  return found?.id ?? null;
+}

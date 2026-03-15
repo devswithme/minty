@@ -389,7 +389,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    const certificateId = statusInput === "PASS" ? createCertificateId() : null;
+    const course = await prisma.course.findUnique({
+      where: { id: submission.courseId },
+      include: { subcourses: true },
+    });
+
+    const hasSubcourses = !!course && course.subcourses.length > 0;
+
+    const certificateId =
+      statusInput === "PASS" && !hasSubcourses ? createCertificateId() : null;
 
     const evaluation = await prisma.submissionEvaluation.create({
       data: {
@@ -438,25 +446,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (statusInput === "PASS") {
       try {
         const studentId = submission.discordId;
-        const member = await guild.members.fetch(studentId).catch(() => null);
+        const memberForStudent = await guild.members
+          .fetch(studentId)
+          .catch(() => null);
         const user =
-          member?.user ??
+          memberForStudent?.user ??
           (await client.users.fetch(studentId).catch(() => null));
 
-        if (user) {
+        if (user && !hasSubcourses) {
           const displayName =
-            (member && (member.nickname || member.displayName)) ||
+            (memberForStudent &&
+              (memberForStudent.nickname || memberForStudent.displayName)) ||
             user.globalName ||
             user.username;
 
-          const course = await prisma.course
-            .findUnique({
-              where: { id: submission.courseId },
-              select: { name: true },
-            })
-            .catch(() => null);
-
-          const courseName = course?.name ?? submission.courseId;
+          const courseForCert = course;
+          const courseName =
+            courseForCert?.name ?? submission.courseId;
           const avgScore = (codeQuality + functionality + conceptual) / 3;
           const scoreText = avgScore.toFixed(2);
 
@@ -485,6 +491,109 @@ client.on(Events.InteractionCreate, async (interaction) => {
             ].join("\n"),
             files: [attachment],
           });
+        }
+
+        if (user && hasSubcourses) {
+          const displayName =
+            (memberForStudent &&
+              (memberForStudent.nickname || memberForStudent.displayName)) ||
+            user.globalName ||
+            user.username;
+
+          const parentCourse = course!;
+          const subcourses = [...parentCourse.subcourses].sort(
+            (a, b) => a.order - b.order,
+          );
+
+          const passEvaluations = [];
+          for (const sc of subcourses) {
+            const ev = await prisma.submissionEvaluation.findFirst({
+              where: {
+                status: "PASS",
+                tallySubmission: {
+                  courseId: parentCourse.id,
+                  discordId: studentId,
+                  subcourseId: sc.id,
+                },
+              } as any,
+              orderBy: { createdAt: "asc" },
+            } as any);
+
+            if (!ev) {
+              passEvaluations.push(null);
+            } else {
+              passEvaluations.push(ev);
+            }
+          }
+
+          const allPassed =
+            passEvaluations.length === subcourses.length &&
+            passEvaluations.every((ev) => ev !== null);
+
+          let inOrder = true;
+          if (allPassed) {
+            for (let i = 1; i < passEvaluations.length; i++) {
+              const prev = passEvaluations[i - 1]!;
+              const curr = passEvaluations[i]!;
+              if (curr.createdAt < prev.createdAt) {
+                inOrder = false;
+                break;
+              }
+            }
+          }
+
+          if (allPassed && inOrder) {
+            const existingParent = await prisma.parentCourseCompletion.findFirst(
+              {
+                where: {
+                  discordId: studentId,
+                  parentCourseId: parentCourse.id,
+                },
+              },
+            );
+
+            if (!existingParent) {
+              const parentCertId = createCertificateId();
+              const parentCompletion =
+                await prisma.parentCourseCompletion.create({
+                  data: {
+                    discordId: studentId,
+                    parentCourseId: parentCourse.id,
+                    certificateId: parentCertId,
+                  },
+                });
+
+              const avgScore =
+                (codeQuality + functionality + conceptual) / 3;
+              const scoreText = avgScore.toFixed(2);
+
+              const verificationUrl =
+                buildVerificationUrl(parentCompletion.certificateId);
+
+              const imageBuffer = await generateCertificateImage({
+                studentName: displayName,
+                courseName: parentCourse.name,
+                scoreText,
+                certificateId: parentCompletion.certificateId,
+                verificationUrl,
+                leadMentorName: mentorDisplayName,
+              });
+
+              const attachment = new AttachmentBuilder(imageBuffer, {
+                name: "certificate.png",
+              });
+
+              await user.send({
+                content: [
+                  `Selamat! Kamu telah menyelesaikan semua subcourse untuk course ${parentCourse.name}. Berikut sertifikat kelulusanmu untuk course ini.`,
+                  "",
+                  `ID Sertifikat: ${parentCompletion.certificateId}`,
+                  `Verifikasi: ${verificationUrl}`,
+                ].join("\n"),
+                files: [attachment],
+              });
+            }
+          }
         }
       } catch (err) {
         console.error("Failed to send certificate DM:", err);
